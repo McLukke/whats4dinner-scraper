@@ -1,0 +1,253 @@
+import 'dotenv/config';
+import { chromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { connectMongo, disconnectMongo } from '../lib/mongo.js';
+import { extractRecipe } from '../lib/gemini.js';
+import { uploadRecipeImageBuffer, uploadRecipeImage } from '../lib/cloudinary.js';
+import { Recipe } from '../models/Recipe.js';
+import { Queue } from '../models/Queue.js';
+
+chromium.use(StealthPlugin());
+
+const BATCH_SIZE = Number(process.env.SCRAPE_CONCURRENCY ?? 5);
+const HEADLESS = process.env.PLAYWRIGHT_HEADLESS !== 'false';
+const MAX_IMAGES = 3;
+const SCRAPE_TIMEOUT_MS = 90_000; // hard kill per URL — prevents GitHub Action stalls
+
+const JUNK_TITLES = ['error', 'not found', 'blocked', 'access denied', 'no recipe', 'page not found', '404'];
+
+const CONSENT_SELECTORS = [
+  'button[id*="accept"]',
+  'button[class*="accept"]',
+  'button[aria-label*="Accept"]',
+  '[id*="cookie"] button',
+  '[class*="consent"] button',
+];
+
+function toSlug(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+}
+
+function isImageBuffer(buf) {
+  if (!buf || buf.length < 4) return false;
+  // Magic bytes: JPG=FF D8, PNG=89 50, WebP=52 49 ('RI'), GIF=47 49 ('GI')
+  return buf[0] === 0xFF || buf[0] === 0x89 || buf[0] === 0x52 || buf[0] === 0x47;
+}
+
+function extractYouTubeId(url) {
+  return url?.match(/(?:embed\/|v=|youtu\.be\/)([^?&/]+)/)?.[1] ?? null;
+}
+
+// Runs inside the page: collects og:image, up to 3 content images, and first video embed
+async function collectMediaUrls(page) {
+  return page.evaluate(() => {
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content ?? null;
+
+    // First YouTube/Vimeo/Mediavine embed
+    const videoEl = document.querySelector(
+      'iframe[src*="youtube.com/embed"], iframe[src*="youtu.be"], ' +
+      'iframe[src*="vimeo.com"], iframe[src*="mediavine"]'
+    );
+    const videoUrl = videoEl?.src ?? null;
+
+    // Images from the recipe content block, filtering out tracking pixels and icons
+    const contentRoot = document.querySelector(
+      '.wprm-recipe, .tasty-recipes, .recipe-card, [class*="recipe"], article, main'
+    ) ?? document.body;
+
+    const contentImageUrls = [...contentRoot.querySelectorAll('img')]
+      .map(img => img.src || img.dataset.src || img.dataset.lazySrc || '')
+      .filter(src => /^https?:\/\/.+\.(jpe?g|png|webp|gif)/i.test(src))
+      .filter(src => !/(logo|icon|avatar|pixel|1x1|tracking|gravatar|spinner|blank)/i.test(src));
+
+    return { ogImage, videoUrl, contentImageUrls };
+  });
+}
+
+async function downloadImageInPage(page, src) {
+  try {
+    const bytes = await page.evaluate(async (url) => {
+      const r = await fetch(url, { credentials: 'include' });
+      if (!r.ok) return null;
+      return Array.from(new Uint8Array(await r.arrayBuffer()));
+    }, src);
+    if (!bytes) return null;
+    const buf = Buffer.from(bytes);
+    return isImageBuffer(buf) ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
+async function scrapePage(url) {
+  const browser = await chromium.launch({ headless: HEADLESS });
+
+  // Hard timeout — closes the browser which aborts all in-flight page ops
+  let timedOut = false;
+  const killTimer = setTimeout(() => {
+    timedOut = true;
+    browser.close().catch(() => {});
+  }, SCRAPE_TIMEOUT_MS);
+
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 800 },
+    locale: 'en-US',
+    extraHTTPHeaders: {
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    },
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+
+    for (const sel of CONSENT_SELECTORS) {
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 1_000 })) { await btn.click(); break; }
+      } catch { /* not present */ }
+    }
+
+    // Wait for JS challenge / lazy content to resolve
+    await page.waitForFunction(
+      () => document.body.innerText.trim().length > 500,
+      { timeout: 30_000 }
+    ).catch(() => {});
+
+    await page.waitForSelector('.wprm-recipe, .tasty-recipes, article, main', { timeout: 8_000 }).catch(() => {});
+
+    // Scroll halfway down to trigger lazy-loaded images, then back up
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight / 2));
+    await page.waitForTimeout(1_500);
+    await page.evaluate(() => window.scrollTo(0, 0));
+
+    const text = await page.evaluate(() => document.body.innerText);
+    if (text.trim().length < 500) {
+      throw new Error(`Insufficient page content (${text.trim().length} chars) — possible bot block`);
+    }
+
+    // --- Media collection ---
+    const { ogImage, videoUrl, contentImageUrls } = await collectMediaUrls(page);
+
+    // Deduplicate and cap at MAX_IMAGES candidates (og:image gets priority slot 0)
+    const seen = new Set();
+    const candidateUrls = [ogImage, ...contentImageUrls].filter(u => {
+      if (!u || seen.has(u)) return false;
+      seen.add(u);
+      return true;
+    }).slice(0, MAX_IMAGES);
+
+    // YouTube thumbnail fallback fills any remaining slots
+    const ytId = extractYouTubeId(videoUrl);
+    if (ytId && candidateUrls.length < MAX_IMAGES) {
+      candidateUrls.push(`https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`);
+    }
+
+    // Download site images via the browser context (respects CDN cookies)
+    const siteUrls = candidateUrls.filter(u => !u.includes('img.youtube.com'));
+    const ytUrls   = candidateUrls.filter(u =>  u.includes('img.youtube.com'));
+
+    const siteBuffers = await Promise.all(siteUrls.map(u => downloadImageInPage(page, u)));
+
+    return { text, videoUrl, siteImagePairs: siteUrls.map((u, i) => ({ url: u, buffer: siteBuffers[i] })), ytImageUrls: ytUrls };
+  } catch (err) {
+    if (timedOut) throw new Error(`Scrape timeout after ${SCRAPE_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(killTimer);
+    await page.close().catch(() => {});
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
+async function processItem(queueItem) {
+  const { url, site, _id } = queueItem;
+
+  const claimed = await Queue.findOneAndUpdate(
+    { _id, status: 'processing' },
+    { $set: { status: 'processing' } },
+    { returnDocument: 'after' }
+  );
+  if (!claimed) return;
+
+  try {
+    console.log(`  Scraping: ${url}`);
+    const { text, videoUrl, siteImagePairs, ytImageUrls } = await scrapePage(url);
+
+    const extracted = await extractRecipe(text);
+
+    if (!extracted?.title || JUNK_TITLES.some(j => extracted.title.toLowerCase().includes(j))) {
+      throw new Error(`Bad title: "${extracted?.title}"`);
+    }
+
+    const slug = toSlug(extracted.title);
+
+    // Upload site images (browser-fetched buffers)
+    const imageUploadResults = await Promise.all(
+      siteImagePairs.map(({ buffer }, i) =>
+        uploadRecipeImageBuffer(buffer, `${slug}-${i}`)
+      )
+    );
+
+    // Upload YouTube thumbnails via axios (public CDN, no auth needed)
+    const ytUploadResults = await Promise.all(
+      ytImageUrls.map((ytUrl, i) =>
+        uploadRecipeImage(ytUrl, `${slug}-yt-${i}`).catch(() => null)
+      )
+    );
+
+    const images = [...imageUploadResults, ...ytUploadResults].filter(Boolean);
+    console.log(`  Media: ${images.length} image(s)${videoUrl ? ', 1 video' : ''}`);
+
+    await Recipe.findOneAndUpdate(
+      { slug },
+      { ...extracted, slug, images, videoUrl: videoUrl ?? null, sourceUrl: url, sourceSite: site, scrapedAt: new Date() },
+      { upsert: true, returnDocument: 'after' }
+    );
+
+    await Queue.findByIdAndUpdate(_id, { status: 'completed', lastError: null, processedAt: new Date() });
+    console.log(`  ✓ ${extracted.title}`);
+  } catch (err) {
+    await Queue.findByIdAndUpdate(_id, { status: 'failed', lastError: err.message.slice(0, 500), processedAt: new Date() });
+    console.log(`  ✗ ${url} — ${err.message.slice(0, 120)}`);
+  }
+}
+
+async function run() {
+  await connectMongo();
+
+  const pending = await Queue.find({ status: 'pending' }).sort({ createdAt: 1 }).limit(BATCH_SIZE);
+
+  if (pending.length === 0) {
+    console.log('Queue is empty — nothing to process.');
+    await disconnectMongo();
+    return;
+  }
+
+  console.log(`Processing ${pending.length} queued URL(s) (batch size: ${BATCH_SIZE})...\n`);
+
+  await Queue.updateMany(
+    { _id: { $in: pending.map(p => p._id) } },
+    { $set: { status: 'processing' } }
+  );
+
+  for (const item of pending) {
+    item.status = 'processing';
+    await processItem(item);
+    if (item !== pending.at(-1)) await new Promise(r => setTimeout(r, 3_000));
+  }
+
+  const counts = await Queue.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]);
+  console.log('\nQueue status after run:', Object.fromEntries(counts.map(c => [c._id, c.count])));
+
+  await disconnectMongo();
+  console.log('Done.');
+}
+
+run().catch(err => {
+  console.error('Fatal:', err.message);
+  process.exit(1);
+});

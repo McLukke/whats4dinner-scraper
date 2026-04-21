@@ -1,0 +1,33 @@
+{
+  "name": "whats4dinner-scraper",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "purge": "node src/jobs/purge.js",
+    "seed":  "node src/jobs/seed.js",
+    "scrape": "node src/jobs/scrape.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/McLukke/whats4dinner-scraper.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/McLukke/whats4dinner-scraper/issues"
+  },
+  "homepage": "https://github.com/McLukke/whats4dinner-scraper#readme",
+  "description": "Recipe scraper and aggregator for Whats4Dinner",
+  "type": "module",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.15.1",
+    "cloudinary": "^2.9.0",
+    "dotenv": "^17.4.2",
+    "mongoose": "^9.5.0",
+    "playwright": "^1.59.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
