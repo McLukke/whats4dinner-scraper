@@ -9,9 +9,10 @@ import { Queue } from '../models/Queue.js';
 
 chromium.use(StealthPlugin());
 
-const BATCH_SIZE = Number(process.env.SCRAPE_CONCURRENCY ?? 5);
-const HEADLESS = process.env.PLAYWRIGHT_HEADLESS !== 'false';
-const MAX_IMAGES = 3;
+const BATCH_SIZE    = Number(process.env.SCRAPE_CONCURRENCY ?? 5);
+const HEADLESS      = process.env.PLAYWRIGHT_HEADLESS !== 'false';
+const SITE_FILTER   = process.env.SCRAPE_SITE ?? null;   // e.g. SCRAPE_SITE=maangchi
+const MAX_IMAGES    = 3;
 const SCRAPE_TIMEOUT_MS = 90_000; // hard kill per URL — prevents GitHub Action stalls
 
 const JUNK_TITLES = ['error', 'not found', 'blocked', 'access denied', 'no recipe', 'page not found', '404'];
@@ -38,17 +39,43 @@ function extractYouTubeId(url) {
   return url?.match(/(?:embed\/|v=|youtu\.be\/)([^?&/]+)/)?.[1] ?? null;
 }
 
+// Returns a canonical embed URL for easy frontend <iframe> use
+// Handles: youtube.com/embed/ID, youtube.com/watch?v=ID, youtu.be/ID, vimeo player URLs
+function normalizeVideoUrl(rawSrc) {
+  if (!rawSrc) return null;
+  const ytId = rawSrc.match(/youtube(?:-nocookie)?\.com\/embed\/([^?&/]+)/)?.[1]
+            ?? rawSrc.match(/(?:youtube\.com\/watch[?&]v=|youtu\.be\/)([^?&/]+)/)?.[1];
+  if (ytId) return `https://www.youtube.com/embed/${ytId}`;
+  const vimeoId = rawSrc.match(/player\.vimeo\.com\/video\/(\d+)/)?.[1]
+               ?? rawSrc.match(/vimeo\.com\/(\d+)/)?.[1];
+  if (vimeoId) return `https://player.vimeo.com/video/${vimeoId}`;
+  return rawSrc;
+}
+
 // Runs inside the page: collects og:image, up to 3 content images, and first video embed
 async function collectMediaUrls(page) {
   return page.evaluate(() => {
     const ogImage = document.querySelector('meta[property="og:image"]')?.content ?? null;
 
-    // First YouTube/Vimeo/Mediavine embed
+    // Resolve iframe src — handles both eager and lazy-loaded embeds (data-src)
+    function iframeSrc(el) {
+      return el?.src || el?.dataset?.src || el?.dataset?.lazySrc || null;
+    }
+
+    // YouTube/Vimeo/Mediavine — check live src AND data-src for lazy-loaders
     const videoEl = document.querySelector(
-      'iframe[src*="youtube.com/embed"], iframe[src*="youtu.be"], ' +
-      'iframe[src*="vimeo.com"], iframe[src*="mediavine"]'
+      'iframe[src*="youtube.com/embed"], iframe[src*="youtube-nocookie.com/embed"], ' +
+      'iframe[src*="youtu.be"], iframe[src*="vimeo.com"], iframe[src*="mediavine"], ' +
+      'iframe[data-src*="youtube.com/embed"], iframe[data-src*="youtube-nocookie.com/embed"], ' +
+      'iframe[data-src*="youtu.be"], iframe[data-src*="vimeo.com"]'
     );
-    const videoUrl = videoEl?.src ?? null;
+    let videoUrl = iframeSrc(videoEl);
+
+    // Fallback: YouTube anchor links (some sites link instead of embed)
+    if (!videoUrl) {
+      const ytLink = document.querySelector('a[href*="youtube.com/watch"], a[href*="youtu.be/"]');
+      videoUrl = ytLink?.href ?? null;
+    }
 
     // Images from the recipe content block, filtering out tracking pixels and icons
     const contentRoot = document.querySelector(
@@ -118,10 +145,11 @@ async function scrapePage(url) {
 
     await page.waitForSelector('.wprm-recipe, .tasty-recipes, article, main', { timeout: 8_000 }).catch(() => {});
 
-    // Scroll halfway down to trigger lazy-loaded images, then back up
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight / 2));
-    await page.waitForTimeout(1_500);
+    // Scroll to bottom to trigger all lazy-loaded images and video iframes, then back to top
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(2_000);
     await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(500);
 
     const text = await page.evaluate(() => document.body.innerText);
     if (text.trim().length < 500) {
@@ -129,7 +157,8 @@ async function scrapePage(url) {
     }
 
     // --- Media collection ---
-    const { ogImage, videoUrl, contentImageUrls } = await collectMediaUrls(page);
+    const { ogImage, videoUrl: rawVideoUrl, contentImageUrls } = await collectMediaUrls(page);
+    const videoUrl = normalizeVideoUrl(rawVideoUrl); // canonical embed URL, no query params
 
     // Deduplicate and cap at MAX_IMAGES candidates (og:image gets priority slot 0)
     const seen = new Set();
@@ -140,7 +169,7 @@ async function scrapePage(url) {
     }).slice(0, MAX_IMAGES);
 
     // YouTube thumbnail fallback fills any remaining slots
-    const ytId = extractYouTubeId(videoUrl);
+    const ytId = extractYouTubeId(rawVideoUrl);
     if (ytId && candidateUrls.length < MAX_IMAGES) {
       candidateUrls.push(`https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`);
     }
@@ -219,7 +248,8 @@ async function processItem(queueItem) {
 async function run() {
   await connectMongo();
 
-  const pending = await Queue.find({ status: 'pending' }).sort({ createdAt: 1 }).limit(BATCH_SIZE);
+  const siteQuery = SITE_FILTER ? { site: SITE_FILTER } : {};
+  const pending = await Queue.find({ status: 'pending', ...siteQuery }).sort({ createdAt: 1 }).limit(BATCH_SIZE);
 
   if (pending.length === 0) {
     console.log('Queue is empty — nothing to process.');

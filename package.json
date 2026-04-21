@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "purge": "node src/jobs/purge.js",
-    "seed":  "node src/jobs/seed.js",
-    "scrape": "node src/jobs/scrape.js"
+    "purge":   "node src/jobs/purge.js",
+    "seed":    "node src/jobs/seed.js",
+    "cleanup": "node src/jobs/cleanup.js",
+    "scrape":  "node src/jobs/scrape.js"
   },
   "repository": {
     "type": "git",

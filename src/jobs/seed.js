@@ -10,7 +10,7 @@ const HEADLESS = process.env.PLAYWRIGHT_HEADLESS !== 'false';
 const MAX_PAGES = 30; // max paginated pages to follow per index
 
 // Negative-filter exclusions — anything matching these is NOT a recipe URL
-const EXCLUDED_SEGMENTS  = ['/category/', '/tag/', '/author/', '/page/', '/wp-content/', '/wp-admin/', '/feed/', '/search/', '/shop/', '/cart/', '/account/'];
+const EXCLUDED_SEGMENTS  = ['/category/', '/tag/', '/author/', '/page/', '/wp-content/', '/wp-admin/', '/feed/', '/search/', '/shop/', '/cart/', '/account/', '/visual-recipe-index/', '/filter/', '/wok-guide/', '/glossary/', '/guide/', '/cookbook/', '/about/', '/contact/', '/ingredients/', '/kitchenware/', '/utensils/', '/tools/', '/equipment/', '/pantry/', '/recipes/', '/all-recipes/', '/vietnamese/', '/blog/'];
 const EXCLUDED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.zip', '.xml', '.rss'];
 
 const SITES = [
