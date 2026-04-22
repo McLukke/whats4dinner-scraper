@@ -52,10 +52,14 @@ function normalizeVideoUrl(rawSrc) {
   return rawSrc;
 }
 
-// Runs inside the page: collects og:image, up to 3 content images, and first video embed
+// Runs inside the page: collects og:image/twitter:image, up to 3 content images, and first video embed
 async function collectMediaUrls(page) {
   return page.evaluate(() => {
-    const ogImage = document.querySelector('meta[property="og:image"]')?.content ?? null;
+    // Metadata tags are always high-res, non-lazy-loaded, and people-free — use as priority source
+    const ogImage = document.querySelector('meta[property="og:image"]')?.content
+                 ?? document.querySelector('meta[name="twitter:image"]')?.content
+                 ?? document.querySelector('meta[name="twitter:image:src"]')?.content
+                 ?? null;
 
     // Resolve iframe src — handles both eager and lazy-loaded embeds (data-src)
     function iframeSrc(el) {
@@ -77,15 +81,25 @@ async function collectMediaUrls(page) {
       videoUrl = ytLink?.href ?? null;
     }
 
-    // Images from the recipe content block, filtering out tracking pixels and icons
+    // Images from the recipe content block, filtering out tracking pixels, icons, and human shots
     const contentRoot = document.querySelector(
       '.wprm-recipe, .tasty-recipes, .recipe-card, [class*="recipe"], article, main'
     ) ?? document.body;
 
+    const JUNK_URL    = /(logo|icon|avatar|pixel|1x1|tracking|gravatar|spinner|blank)/i;
+    const HUMAN_URL   = /(chef|author|biography|profile|portrait)/i;
+
     const contentImageUrls = [...contentRoot.querySelectorAll('img')]
-      .map(img => img.src || img.dataset.src || img.dataset.lazySrc || '')
-      .filter(src => /^https?:\/\/.+\.(jpe?g|png|webp|gif)/i.test(src))
-      .filter(src => !/(logo|icon|avatar|pixel|1x1|tracking|gravatar|spinner|blank)/i.test(src));
+      .filter(img => {
+        const src = img.src || img.dataset.src || img.dataset.lazySrc || '';
+        if (!src || !/^https?:\/\/.+\.(jpe?g|png|webp|gif)/i.test(src)) return false;
+        if (JUNK_URL.test(src) || HUMAN_URL.test(src)) return false;
+        if (HUMAN_URL.test(img.alt || '')) return false;
+        // Reject portrait-oriented images — food shots are landscape; person shots are portrait
+        if (img.naturalWidth > 0 && img.naturalHeight > img.naturalWidth) return false;
+        return true;
+      })
+      .map(img => img.src || img.dataset.src || img.dataset.lazySrc || '');
 
     return { ogImage, videoUrl, contentImageUrls };
   });
@@ -145,9 +159,14 @@ async function scrapePage(url) {
 
     await page.waitForSelector('.wprm-recipe, .tasty-recipes, article, main', { timeout: 8_000 }).catch(() => {});
 
-    // Scroll to bottom to trigger all lazy-loaded images and video iframes, then back to top
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(2_000);
+    // Incremental scroll so images enter the viewport and lazy-loaders fire
+    const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
+    const step = 800; // matches viewport height
+    for (let y = step; y < scrollHeight + step; y += step) {
+      await page.evaluate((pos) => window.scrollTo(0, pos), y);
+      await page.waitForTimeout(250);
+    }
+    await page.waitForTimeout(800); // let final batch of lazy images resolve
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForTimeout(500);
 
