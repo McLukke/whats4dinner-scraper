@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init *)",
+      "Bash(npm pkg *)",
+      "Bash(npm install *)",
+      "WebFetch(domain:thewoksoflife.com)",
+      "Bash(node *)",
+      "Bash(npx playwright *)",
+      "WebFetch(domain:www.justonecookbook.com)",
+      "Bash(SCRAPE_CONCURRENCY=4 node *)",
+      "Bash(PLAYWRIGHT_HEADLESS=false SCRAPE_CONCURRENCY=3 node *)",
+      "Bash(SCRAPE_CONCURRENCY=1 node *)",
+      "Bash(SCRAPE_CONCURRENCY=2 node *)",
+      "Bash(SCRAPE_CONCURRENCY=2 PLAYWRIGHT_HEADLESS=false node *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(npm run *)",
+      "Bash(SCRAPE_CONCURRENCY=10 npm run *)",
+      "Bash(SCRAPE_SITE=maangchi SCRAPE_CONCURRENCY=3 npm run *)"
+    ]
+  }
+}

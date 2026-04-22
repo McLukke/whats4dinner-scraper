@@ -249,7 +249,7 @@ async function run() {
   await connectMongo();
 
   const siteQuery = SITE_FILTER ? { site: SITE_FILTER } : {};
-  const pending = await Queue.find({ status: 'pending', ...siteQuery }).sort({ createdAt: 1 }).limit(BATCH_SIZE);
+  const pending = await Queue.find({ status: 'pending', ...siteQuery }).sort({ lastmod: -1, createdAt: 1 }).limit(BATCH_SIZE);
 
   if (pending.length === 0) {
     console.log('Queue is empty — nothing to process.');
