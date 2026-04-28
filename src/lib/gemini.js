@@ -127,11 +127,19 @@ export async function extractRecipe(rawText) {
   const text = rawText.slice(0, 16_000);
 
   const density = fluffDensity(text);
+
+  
   const prompt = density > 0.10
     ? EXTRACTION_PROMPT + RECIPE_ONLY_PREFIX + text
     : EXTRACTION_PROMPT + text;
 
-  const result = await model.generateContent(prompt);
+  const result = await model.generateContent({
+    contents: prompt,
+    generationConfig: {
+      maxOutputTokens: 2048,
+      responseMimeType: "application/json",
+    },
+  });
   const raw = result.response.text().trim();
   try {
     const parsed = parseGeminiJson(raw);
