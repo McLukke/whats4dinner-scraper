@@ -23,6 +23,8 @@ const CONSENT_SELECTORS = [
   'button[aria-label*="Accept"]',
   '[id*="cookie"] button',
   '[class*="consent"] button',
+  'text=Accept',
+  'text=同意',
 ];
 
 function toSlug(title) {
@@ -131,11 +133,11 @@ async function scrapePage(url) {
   }, SCRAPE_TIMEOUT_MS);
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 800 },
-    locale: 'en-US',
+    locale: 'zh-HK',
     extraHTTPHeaders: {
-      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Language': 'zh-HK,zh;q=0.9,en-US;q=0.8,en;q=0.7',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     },
   });
@@ -227,7 +229,8 @@ async function processItem(queueItem) {
 
     const extracted = await extractRecipe(text);
 
-    if (!extracted?.title || JUNK_TITLES.some(j => extracted.title.toLowerCase().includes(j))) {
+    if (!extracted) throw new Error('Gemini rejected page: no recipe content detected');
+    if (!extracted.title || JUNK_TITLES.some(j => extracted.title.toLowerCase().includes(j))) {
       throw new Error(`Bad title: "${extracted?.title}"`);
     }
 
@@ -268,7 +271,7 @@ async function run() {
   await connectMongo();
 
   const siteQuery = SITE_FILTER ? { site: SITE_FILTER } : {};
-  const pending = await Queue.find({ status: 'pending', ...siteQuery }).sort({ lastmod: -1, createdAt: 1 }).limit(BATCH_SIZE);
+  const pending = await Queue.find({ status: 'pending', ...siteQuery }).sort({ priority: -1, lastmod: -1, createdAt: 1 }).limit(BATCH_SIZE);
 
   if (pending.length === 0) {
     console.log('Queue is empty — nothing to process.');

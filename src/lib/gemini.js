@@ -12,11 +12,13 @@ Return ONLY valid JSON — no markdown fences, no commentary — matching this s
   "title": "string",
   "asianName": "string | null",
   "description": "string",
+  "servings": number | null,
   "prepTimeMinutes": number | null,
   "cookTimeMinutes": number | null,
+  "totalTimeMinutes": number | null,
   "fermentationTimeMinutes": number | null,
   "marinationTimeMinutes": number | null,
-  "servings": number | null,
+  "category": "Baking" | "Cooking",
   "ingredients": [
     {
       "group": "string",
@@ -33,9 +35,20 @@ Return ONLY valid JSON — no markdown fences, no commentary — matching this s
   "imageUrl": "string | null"
 }
 
+## Content filter — REJECT the page entirely (return null) if:
+- The page is primarily about gardening, plant care, history, travel, or author biography.
+- There is no ingredient list and no cooking instructions.
+- The content is a teaser, preview, or "pre-prep" story with no actionable recipe.
+
+## Category rules
+- Set category to "Baking" if the ingredients or instructions are dominated by: oven, flour, yeast, cake, bread, bake, pastry, dough, muffin, cookie, tart, or pie.
+- Otherwise set category to "Cooking".
+
 ## Timing rules
-- prepTimeMinutes: active hands-on preparation time only.
-- cookTimeMinutes: active cooking time only.
+- servings: integer number of servings; null if not stated.
+- prepTimeMinutes: active hands-on preparation time only; integer.
+- cookTimeMinutes: active cooking time only; integer.
+- totalTimeMinutes: total end-to-end time from start to table; integer. If not explicitly stated, compute as prepTimeMinutes + cookTimeMinutes (ignoring passive times).
 - fermentationTimeMinutes: any passive fermentation time mentioned (e.g. kimchi fermenting 1–2 days = 1440–2880 min). If a range is given, use the midpoint.
 - marinationTimeMinutes: any passive marinating/resting time (e.g. "marinate overnight" = 480 min, "marinate 30 min" = 30). If a range is given, use the minimum.
 
