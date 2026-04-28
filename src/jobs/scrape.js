@@ -54,21 +54,40 @@ function normalizeVideoUrl(rawSrc) {
   return rawSrc;
 }
 
-// Runs inside the page: collects og:image/twitter:image, up to 3 content images, and first video embed
+// Runs inside the page: JSON-LD > og:image > DOM images (with srcset + 400px filter) + first video
 async function collectMediaUrls(page) {
   return page.evaluate(() => {
-    // Metadata tags are always high-res, non-lazy-loaded, and people-free — use as priority source
+    // --- Priority 1: JSON-LD structured data (Recipe / Article) ---
+    let jsonLdImage = null;
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const data = JSON.parse(script.textContent);
+        const nodes = Array.isArray(data) ? data : (data['@graph'] ?? [data]);
+        for (const node of nodes) {
+          if (!['Recipe', 'Article', 'NewsArticle'].includes(node['@type'])) continue;
+          const img = node.image;
+          if (typeof img === 'string' && img.startsWith('http')) { jsonLdImage = img; break; }
+          if (Array.isArray(img) && img.length > 0) {
+            const first = img[0];
+            jsonLdImage = (typeof first === 'string' ? first : first?.url) ?? null;
+            break;
+          }
+          if (img?.url) { jsonLdImage = img.url; break; }
+        }
+        if (jsonLdImage) break;
+      } catch { /* malformed JSON-LD — skip */ }
+    }
+
+    // --- Priority 2: Open Graph / Twitter meta tags ---
     const ogImage = document.querySelector('meta[property="og:image"]')?.content
                  ?? document.querySelector('meta[name="twitter:image"]')?.content
                  ?? document.querySelector('meta[name="twitter:image:src"]')?.content
                  ?? null;
 
-    // Resolve iframe src — handles both eager and lazy-loaded embeds (data-src)
+    // --- Video embed ---
     function iframeSrc(el) {
       return el?.src || el?.dataset?.src || el?.dataset?.lazySrc || null;
     }
-
-    // YouTube/Vimeo/Mediavine — check live src AND data-src for lazy-loaders
     const videoEl = document.querySelector(
       'iframe[src*="youtube.com/embed"], iframe[src*="youtube-nocookie.com/embed"], ' +
       'iframe[src*="youtu.be"], iframe[src*="vimeo.com"], iframe[src*="mediavine"], ' +
@@ -76,34 +95,51 @@ async function collectMediaUrls(page) {
       'iframe[data-src*="youtu.be"], iframe[data-src*="vimeo.com"]'
     );
     let videoUrl = iframeSrc(videoEl);
-
-    // Fallback: YouTube anchor links (some sites link instead of embed)
     if (!videoUrl) {
       const ytLink = document.querySelector('a[href*="youtube.com/watch"], a[href*="youtu.be/"]');
       videoUrl = ytLink?.href ?? null;
     }
 
-    // Images from the recipe content block, filtering out tracking pixels, icons, and human shots
+    // --- Priority 3: DOM images with lazy-load bypass and srcset support ---
+    function bestSrcsetUrl(srcset) {
+      if (!srcset) return null;
+      try {
+        const candidates = srcset.split(',').map(s => {
+          const parts = s.trim().split(/\s+/);
+          return { url: parts[0], weight: parseFloat(parts[1]) || 1 };
+        });
+        candidates.sort((a, b) => b.weight - a.weight);
+        return candidates[0]?.url ?? null;
+      } catch { return null; }
+    }
+
     const contentRoot = document.querySelector(
       '.wprm-recipe, .tasty-recipes, .recipe-card, [class*="recipe"], article, main'
     ) ?? document.body;
 
-    const JUNK_URL    = /(logo|icon|avatar|pixel|1x1|tracking|gravatar|spinner|blank)/i;
-    const HUMAN_URL   = /(chef|author|biography|profile|portrait)/i;
+    const JUNK_URL  = /(logo|icon|avatar|pixel|1x1|tracking|gravatar|spinner|blank|placeholder)/i;
+    const HUMAN_URL = /(chef|author|biography|profile|portrait)/i;
 
     const contentImageUrls = [...contentRoot.querySelectorAll('img')]
       .filter(img => {
-        const src = img.src || img.dataset.src || img.dataset.lazySrc || '';
+        const src = img.src || img.dataset.src || img.dataset.lazySrc
+                 || bestSrcsetUrl(img.srcset) || '';
         if (!src || !/^https?:\/\/.+\.(jpe?g|png|webp|gif)/i.test(src)) return false;
         if (JUNK_URL.test(src) || HUMAN_URL.test(src)) return false;
         if (HUMAN_URL.test(img.alt || '')) return false;
-        // Reject portrait-oriented images — food shots are landscape; person shots are portrait
+        // Min-dimension check: reject icons and thumbnails
+        if (img.naturalWidth > 0 && img.naturalWidth < 400) return false;
+        if (img.naturalHeight > 0 && img.naturalHeight < 400) return false;
+        // Reject portrait orientation — food shots are landscape; person shots are portrait
         if (img.naturalWidth > 0 && img.naturalHeight > img.naturalWidth) return false;
         return true;
       })
-      .map(img => img.src || img.dataset.src || img.dataset.lazySrc || '');
+      .map(img =>
+        // Prefer highest-res source: srcset > live src > data-src > data-lazy-src
+        bestSrcsetUrl(img.srcset) || img.src || img.dataset.src || img.dataset.lazySrc || ''
+      );
 
-    return { ogImage, videoUrl, contentImageUrls };
+    return { jsonLdImage, ogImage, videoUrl, contentImageUrls };
   });
 }
 
@@ -195,12 +231,16 @@ async function scrapePage(url) {
     }
 
     // --- Media collection ---
-    const { ogImage, videoUrl: rawVideoUrl, contentImageUrls } = await collectMediaUrls(page);
+    // Half-page scroll ensures the hero image (top of content) is in-viewport so lazy-loaders fire
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight / 2));
+    await page.waitForTimeout(500);
+
+    const { jsonLdImage, ogImage, videoUrl: rawVideoUrl, contentImageUrls } = await collectMediaUrls(page);
     const videoUrl = normalizeVideoUrl(rawVideoUrl); // canonical embed URL, no query params
 
-    // Deduplicate and cap at MAX_IMAGES candidates (og:image gets priority slot 0)
+    // Deduplicate and cap at MAX_IMAGES candidates: JSON-LD > og:image > DOM images
     const seen = new Set();
-    const candidateUrls = [ogImage, ...contentImageUrls].filter(u => {
+    const candidateUrls = [jsonLdImage, ogImage, ...contentImageUrls].filter(u => {
       if (!u || seen.has(u)) return false;
       seen.add(u);
       return true;
@@ -231,7 +271,7 @@ async function scrapePage(url) {
 }
 
 async function processItem(queueItem) {
-  const { url, site, _id } = queueItem;
+  const { url, site, _id, imageOnly } = queueItem;
 
   const claimed = await Queue.findOneAndUpdate(
     { _id, status: 'processing' },
@@ -241,8 +281,35 @@ async function processItem(queueItem) {
   if (!claimed) return;
 
   try {
-    console.log(`  Scraping: ${url}`);
+    console.log(`  ${imageOnly ? '[imageOnly] ' : ''}Scraping: ${url}`);
     const { text, videoUrl, siteImagePairs, ytImageUrls } = await scrapePage(url);
+
+    if (imageOnly) {
+      // Patch images on the existing recipe without re-running Gemini
+      const recipe = await Recipe.findOne({ sourceUrl: url }, { slug: 1 });
+      if (!recipe) throw new Error('imageOnly: no existing recipe found for this URL');
+
+      const imageUploadResults = await Promise.all(
+        siteImagePairs.map(({ buffer }, i) =>
+          uploadRecipeImageBuffer(buffer, `${recipe.slug}-${i}`)
+        )
+      );
+      const ytUploadResults = await Promise.all(
+        ytImageUrls.map((ytUrl, i) =>
+          uploadRecipeImage(ytUrl, `${recipe.slug}-yt-${i}`).catch(() => null)
+        )
+      );
+      const images = [...imageUploadResults, ...ytUploadResults].filter(Boolean);
+      if (images.length === 0) throw new Error('imageOnly: no valid images found after re-scrape');
+
+      await Recipe.findOneAndUpdate(
+        { slug: recipe.slug },
+        { $set: { images, scrapedAt: new Date() } }
+      );
+      await Queue.findByIdAndUpdate(_id, { status: 'completed', lastError: null, processedAt: new Date() });
+      console.log(`  ✓ [imageOnly] ${recipe.slug} — ${images.length} image(s)`);
+      return;
+    }
 
     const extracted = await extractRecipe(text);
 

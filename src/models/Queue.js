@@ -9,6 +9,7 @@ const QueueSchema = new mongoose.Schema({
   lastError:   { type: String, default: null },
   processedAt: { type: Date, default: null },
   reprocess:   { type: Boolean, default: false }, // set by purgeFluff.js for re-extraction passes
+  imageOnly:   { type: Boolean, default: false }, // set by fixImages.js — re-upload images, skip Gemini
 }, { timestamps: true });
 
 // Priority first, then newest lastmod, then FIFO within the same tier
