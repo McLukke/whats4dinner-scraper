@@ -6,7 +6,8 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 const EXTRACTION_PROMPT = `
 You are an expert recipe extraction assistant specialising in Asian cuisine — Chinese, Japanese, Korean, and Southeast Asian cooking.
 Given raw text scraped from a recipe webpage, extract structured data.
-Return ONLY valid JSON — no markdown fences, no commentary — matching this schema exactly:
+Return ONLY valid JSON — no markdown fences, no commentary — matching this schema exactly.
+If the page contains no clear recipe, return exactly: {"error": "no_recipe_found"}
 
 {
   "title": "string",
@@ -35,10 +36,25 @@ Return ONLY valid JSON — no markdown fences, no commentary — matching this s
   "imageUrl": "string | null"
 }
 
-## Content filter — REJECT the page entirely (return null) if:
+## Content filter — return {"error": "no_recipe_found"} if:
 - The page is primarily about gardening, plant care, history, travel, or author biography.
 - There is no ingredient list and no cooking instructions.
 - The content is a teaser, preview, or "pre-prep" story with no actionable recipe.
+
+## Negative constraints — STRICT purity rules
+Ingredients:
+- Extract ONLY items physically added to the dish during preparation.
+- EXCLUDE: "Suggested pairings", "Serving suggestions", "Goes well with", "Garden preparation tips", "Historical context", "Where to buy" recommendations.
+- Each ingredient entry must be a discrete item with a quantity/unit. Narrative sentences like "You can also add X if you like" must be dropped.
+
+Instructions:
+- Each step must be a pure action sentence: verb + object + method (e.g. "Heat oil in pan over medium heat until shimmering").
+- STRIP all narrative from steps. Remove sentences containing: personal anecdote ("My grandmother…", "I remember…", "We always…"), place references ("In Hong Kong…", "During my trip…"), historical notes, emotional language, or blog commentary.
+- If a step mixes action with narrative, keep only the actionable clause.
+
+Keyword contamination:
+- Before finalising, scan your extracted instructions and ingredient notes for these words: garden, soil, seeds, fertilizer, childhood, memory, trip, travel, grandmother, nostalgia.
+- If these words appear in more than 10% of your extracted tokens, the page is contaminated with lifestyle content — return {"error": "no_recipe_found"} instead.
 
 ## Category rules
 - Set category to "Baking" if the ingredients or instructions are dominated by: oven, flour, yeast, cake, bread, bake, pastry, dough, muffin, cookie, tart, or pie.
@@ -95,13 +111,33 @@ function parseGeminiJson(raw) {
   return JSON.parse(candidate);
 }
 
+const FLUFF_KEYWORDS = ['garden', 'soil', 'seeds', 'fertilizer', 'childhood', 'memory', 'trip', 'travel', 'grandmother', 'nostalgia'];
+
+const RECIPE_ONLY_PREFIX = `RECIPE-ONLY MODE: The following text may contain lifestyle or blog content mixed with a recipe. Extract ONLY the cooking ingredients and instructions. Ignore all personal stories, travel anecdotes, garden notes, and historical context. If you cannot isolate a clear recipe, return {"error": "no_recipe_found"}.\n\n`;
+
+function fluffDensity(text) {
+  const words = text.toLowerCase().split(/\s+/);
+  if (words.length === 0) return 0;
+  const fluffCount = words.filter(w => FLUFF_KEYWORDS.some(k => w.includes(k))).length;
+  return fluffCount / words.length;
+}
+
 export async function extractRecipe(rawText) {
   // Cap at 16 000 chars — enough for complex multi-component recipes (bibimbap, ramen)
   const text = rawText.slice(0, 16_000);
-  const result = await model.generateContent(EXTRACTION_PROMPT + text);
+
+  const density = fluffDensity(text);
+  const prompt = density > 0.10
+    ? EXTRACTION_PROMPT + RECIPE_ONLY_PREFIX + text
+    : EXTRACTION_PROMPT + text;
+
+  const result = await model.generateContent(prompt);
   const raw = result.response.text().trim();
   try {
-    return parseGeminiJson(raw);
+    const parsed = parseGeminiJson(raw);
+    // Treat explicit error sentinel the same as null (caller checks for falsy)
+    if (parsed?.error) return null;
+    return parsed;
   } catch {
     // Surface the raw response so we can diagnose prompt failures
     throw new Error(`Gemini JSON parse failed. Raw response:\n${raw.slice(0, 500)}`);

@@ -8,6 +8,7 @@ const QueueSchema = new mongoose.Schema({
   lastmod:     { type: Date, default: null },   // populated from sitemap <lastmod> where available
   lastError:   { type: String, default: null },
   processedAt: { type: Date, default: null },
+  reprocess:   { type: Boolean, default: false }, // set by purgeFluff.js for re-extraction passes
 }, { timestamps: true });
 
 // Priority first, then newest lastmod, then FIFO within the same tier

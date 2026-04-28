@@ -172,6 +172,23 @@ async function scrapePage(url) {
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForTimeout(500);
 
+    // Strip structural noise and blog-fluff containers before text extraction
+    await page.evaluate(() => {
+      const selectors = [
+        'header', 'footer', 'aside', 'nav',
+        '.sidebar', '.widget', '.comments', '.comment-section', '.comment-list',
+        '.ads', '.ad', '.adsbygoogle', '.advertisement',
+        '.related-posts', '.related', '.newsletter', '.email-signup',
+        '[class*="author"]', '[class*="social"]', '[class*="bio"]',
+        '[class*="share"]', '[class*="subscribe"]', '[class*="popup"]',
+        '[class*="promo"]', '[class*="banner"]',
+        '[id*="author"]', '[id*="social"]', '[id*="comments"]', '[id*="sidebar"]',
+      ];
+      for (const sel of selectors) {
+        document.querySelectorAll(sel).forEach(el => el.remove());
+      }
+    });
+
     const text = await page.evaluate(() => document.body.innerText);
     if (text.trim().length < 500) {
       throw new Error(`Insufficient page content (${text.trim().length} chars) — possible bot block`);
