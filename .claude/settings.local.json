@@ -17,7 +17,8 @@
       "Bash(git commit *)",
       "Bash(npm run *)",
       "Bash(SCRAPE_CONCURRENCY=10 npm run *)",
-      "Bash(SCRAPE_SITE=maangchi SCRAPE_CONCURRENCY=3 npm run *)"
+      "Bash(SCRAPE_SITE=maangchi SCRAPE_CONCURRENCY=3 npm run *)",
+      "Bash(git push *)"
     ]
   }
 }

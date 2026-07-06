@@ -6,7 +6,11 @@
     "purge":   "node src/jobs/purge.js",
     "seed":    "node src/jobs/seed.js",
     "cleanup": "node src/jobs/cleanup.js",
-    "scrape":  "node src/jobs/scrape.js"
+    "scrape":  "node src/jobs/scrape.js",
+    "scrape:hk01": "node src/scrapers/hk01Scraper.js",
+    "scrape:christine": "node src/scrapers/christineScraper.js",
+    "scrape:local": "node src/jobs/localScrapeScheduler.js",
+    "backfill:christine-images": "node src/jobs/backfillChristineImages.js"
   },
   "repository": {
     "type": "git",

@@ -1,4 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import dotenv from 'dotenv';
+
+dotenv.config({ path: '.env' });
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
@@ -102,11 +105,10 @@ Korean — preserve these terms exactly in the name field, do not translate:
 Raw text:
 `;
 
-// Strip <think> blocks, then extract JSON from any ```json ... ``` fence
-// or parse bare JSON — handles all Gemini 2.5 Flash response styles.
 function parseGeminiJson(raw) {
   const noThink = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-  const fenceMatch = noThink.match(/```(?:json)?\s*([\s\S]*?)```/);
+  // Safe hex escape sequence matches backticks (\x60) cleanly to prevent markdown rendering errors
+  const fenceMatch = noThink.match(/\x60\x60\x60(?:json)?\s*([\s\S]*?)\x60\x60\x60/);
   const candidate = fenceMatch ? fenceMatch[1].trim() : noThink;
   return JSON.parse(candidate);
 }
@@ -123,31 +125,30 @@ function fluffDensity(text) {
 }
 
 export async function extractRecipe(rawText) {
-  // Cap at 16 000 chars — enough for complex multi-component recipes (bibimbap, ramen)
+  // Cap at 16,000 chars — enough for complex multi-component recipes (bibimbap, ramen)
   const text = rawText.slice(0, 16_000);
-
   const density = fluffDensity(text);
 
-  
   const prompt = density > 0.10
     ? EXTRACTION_PROMPT + RECIPE_ONLY_PREFIX + text
     : EXTRACTION_PROMPT + text;
 
+  // Corrected structural block wrapping the prompt inside 'contents' array matching SDK specifications
   const result = await model.generateContent({
-    contents: prompt,
+    contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      maxOutputTokens: 2048,
+      maxOutputTokens: 8192,
       responseMimeType: "application/json",
     },
   });
+  
   const raw = result.response.text().trim();
   try {
     const parsed = parseGeminiJson(raw);
-    // Treat explicit error sentinel the same as null (caller checks for falsy)
     if (parsed?.error) return null;
     return parsed;
   } catch {
-    // Surface the raw response so we can diagnose prompt failures
-    throw new Error(`Gemini JSON parse failed. Raw response:\n${raw.slice(0, 500)}`);
+    const cutOffHint = (!raw.endsWith('}') && !raw.endsWith('`')) ? ' [TRUNCATED RESPONSE]' : '';
+    throw new Error(`Gemini JSON parse failed${cutOffHint}. Raw response length: ${raw.length}\nPreview:\n${raw.slice(0, 300)}...`);
   }
 }
